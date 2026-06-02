@@ -1,8 +1,8 @@
 import os
 import json
 import re
+import requests
 from flask import Flask, render_template, request, jsonify
-from anthropic import Anthropic
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -11,27 +11,18 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# Initialize Anthropic client safely
-try:
-    api_key = os.getenv('ANTHROPIC_API_KEY')
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY not set")
-    client = Anthropic(api_key=api_key)
-except Exception as e:
-    print(f"Error initializing Anthropic client: {e}")
-    client = None
+api_key = os.getenv('ANTHROPIC_API_KEY')
 
 SYSTEM_PROMPT = """Kamu adalah analis teknikal profesional untuk saham IDX. 
 
 Analisis chart dengan fokus:
-1. Support levels (3-5 level dari terendah ke tertinggi)
+1. Support levels (3-5 level)
 2. Resistance levels (3-5 level)
-3. Trading plan dengan entry, stop loss, targets, risk/reward
+3. Trading plan: entry, stop loss, targets, risk/reward
 4. Rekomendasi: SHORT/LONG/AVOID
 5. Confidence level (0-100%)
 
-Output: JSON ONLY (no explanation)
-"""
+Output: JSON ONLY"""
 
 @app.route('/')
 def index():
@@ -39,15 +30,11 @@ def index():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
-    if not client:
-        return jsonify({
-            "status": "error",
-            "message": "Anthropic client not initialized. Check API key."
-        }), 500
+    if not api_key:
+        return jsonify({"status": "error", "message": "API key not set"}), 500
     
     try:
         data = request.json
-        
         saham_code = data.get('saham_code', '').upper()
         chart_description = data.get('chart_description', '')
         current_price = data.get('current_price', '')
@@ -60,14 +47,33 @@ Deskripsi: {chart_description}
 Bandarmologi: {bandarmologi_data}
 Output JSON format."""
         
-        response = client.messages.create(
-            model="claude-3-5-sonnet-20241022",
-            max_tokens=1000,
-            system=SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_message}]
+        headers = {
+            "x-api-key": api_key,
+            "content-type": "application/json"
+        }
+        
+        payload = {
+            "model": "claude-3-5-sonnet-20241022",
+            "max_tokens": 1000,
+            "system": SYSTEM_PROMPT,
+            "messages": [{"role": "user", "content": user_message}]
+        }
+        
+        response = requests.post(
+            "https://api.anthropic.com/v1/messages",
+            headers=headers,
+            json=payload,
+            timeout=30
         )
         
-        result_text = response.content[0].text
+        if response.status_code != 200:
+            return jsonify({
+                "status": "error",
+                "message": f"API Error: {response.status_code}"
+            }), 400
+        
+        response_data = response.json()
+        result_text = response_data.get('content', [{}])[0].get('text', '')
         
         try:
             result_json = json.loads(result_text)
@@ -78,25 +84,22 @@ Output JSON format."""
             else:
                 result_json = {"raw_response": result_text}
         
-        cost = (response.usage.input_tokens / 1_000_000 * 3.00) + (response.usage.output_tokens / 1_000_000 * 15.00)
-        print(f"✅ {saham_code}: {response.usage.input_tokens} tokens, ${cost:.4f}")
+        input_tokens = response_data.get('usage', {}).get('input_tokens', 0)
+        output_tokens = response_data.get('usage', {}).get('output_tokens', 0)
+        cost = (input_tokens / 1_000_000 * 3.00) + (output_tokens / 1_000_000 * 15.00)
         
         return jsonify({
             "status": "success",
             "data": result_json,
             "usage": {
-                "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens,
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
                 "cost_usd": f"{cost:.4f}"
             }
         })
     
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        return jsonify({
-            "status": "error",
-            "message": str(e)
-        }), 400
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
