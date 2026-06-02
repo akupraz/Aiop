@@ -11,19 +11,26 @@ app = Flask(__name__)
 UPLOAD_FOLDER = 'uploads'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-api_key = os.getenv('ANTHROPIC_API_KEY')
-client = Anthropic(api_key=api_key)
+# Initialize Anthropic client safely
+try:
+    api_key = os.getenv('ANTHROPIC_API_KEY')
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY not set")
+    client = Anthropic(api_key=api_key)
+except Exception as e:
+    print(f"Error initializing Anthropic client: {e}")
+    client = None
 
 SYSTEM_PROMPT = """Kamu adalah analis teknikal profesional untuk saham IDX. 
 
 Analisis chart dengan fokus:
 1. Support levels (3-5 level dari terendah ke tertinggi)
 2. Resistance levels (3-5 level)
-3. Trading plan dengan entry, stop loss, targets, risk/reward, holding time
-4. Rekomendasi: SCALPING / FAST TRADING / SWING / AVOID
+3. Trading plan dengan entry, stop loss, targets, risk/reward
+4. Rekomendasi: SHORT/LONG/AVOID
 5. Confidence level (0-100%)
 
-Output: JSON ONLY (no explanation text)
+Output: JSON ONLY (no explanation)
 """
 
 @app.route('/')
@@ -32,8 +39,15 @@ def index():
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
+    if not client:
+        return jsonify({
+            "status": "error",
+            "message": "Anthropic client not initialized. Check API key."
+        }), 500
+    
     try:
         data = request.json
+        
         saham_code = data.get('saham_code', '').upper()
         chart_description = data.get('chart_description', '')
         current_price = data.get('current_price', '')
@@ -54,14 +68,18 @@ Output JSON format."""
         )
         
         result_text = response.content[0].text
+        
         try:
             result_json = json.loads(result_text)
         except json.JSONDecodeError:
             json_match = re.search(r'\{.*\}', result_text, re.DOTALL)
-            result_json = json.loads(json_match.group()) if json_match else {"raw_response": result_text}
+            if json_match:
+                result_json = json.loads(json_match.group())
+            else:
+                result_json = {"raw_response": result_text}
         
         cost = (response.usage.input_tokens / 1_000_000 * 3.00) + (response.usage.output_tokens / 1_000_000 * 15.00)
-        print(f"✅ Analisis {saham_code}: {response.usage.input_tokens} input, {response.usage.output_tokens} output, ${cost:.4f}")
+        print(f"✅ {saham_code}: {response.usage.input_tokens} tokens, ${cost:.4f}")
         
         return jsonify({
             "status": "success",
@@ -72,8 +90,13 @@ Output JSON format."""
                 "cost_usd": f"{cost:.4f}"
             }
         })
+    
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+        print(f"❌ Error: {str(e)}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 400
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
